@@ -1,6 +1,10 @@
 # Record Rename for OBS Studio
 
-Plugin for OBS Studio to rename recordings and replay buffer saves.
+Plugin for OBS Studio to rename recordings and replay buffer saves (clips).
+
+# Download
+
+https://obsproject.com/forum/resources/record-rename.2134/
 
 # Build
 - Build OBS Studio: https://obsproject.com/wiki/Install-Instructions
