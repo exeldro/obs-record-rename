@@ -6,6 +6,7 @@
 #include <QDialogButtonBox>
 #include <QMenu>
 #include <QTimer>
+#include <QMainWindow>
 #include <string>
 #include <util/config-file.h>
 #include <util/dstr.h>
@@ -13,6 +14,7 @@
 
 static bool rename_record_enabled = true;
 static bool rename_replay_enabled = true;
+std::map<obs_output_t *, std::vector<std::string>> output_files;
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_AUTHOR("Exeldro");
@@ -67,9 +69,72 @@ void ask_rename_file_UI(void *param)
 		}
 		if (!RenameFileDialog::AskForName(main_window, title, filename))
 			return;
+		if (filename == orig_filename)
+			return;
 		new_path = folder + filename + extension;
 	}
 	os_rename(path.c_str(), new_path.c_str());
+}
+
+void ask_rename_files_UI(void *param)
+{
+	obs_output_t *output = (obs_output_t *)param;
+	auto t = output_files.find(output);
+	if (t == output_files.end() || t->second.empty())
+		return;
+	const auto main_window = static_cast<QWidget *>(obs_frontend_get_main_window());
+	std::string path = t->second.front();
+	size_t extension_pos = -1;
+	size_t slash_pos = -1;
+	for (size_t pos = path.length(); pos > 0; pos--) {
+		auto c = path[pos - 1];
+		if (c == '.' && extension_pos == (size_t)-1) {
+			extension_pos = pos;
+		} else if (c == '/' || c == '\\') {
+			slash_pos = pos;
+			break;
+		}
+	}
+	std::string filename;
+	std::string extension;
+	std::string folder;
+	if (extension_pos != (size_t)-1) {
+		filename = path.substr(0, extension_pos - 1);
+		extension = path.substr(extension_pos - 1);
+	} else {
+		filename = path;
+	}
+	if (slash_pos != (size_t)-1) {
+		folder = filename.substr(0, slash_pos);
+		filename = filename.substr(slash_pos);
+	}
+	std::string orig_filename = filename;
+	std::string new_path = folder + filename + extension;
+	while (os_file_exists(new_path.c_str())) {
+		std::string title = obs_module_text("RenameFiles");
+		title += " (";
+		title += std::to_string(t->second.size());
+		title += " ";
+		title += obs_module_text("Files");
+		title += ")";
+		if (orig_filename != filename) {
+			title += ": ";
+			title += obs_module_text("FileExists");
+		}
+		if (!RenameFileDialog::AskForName(main_window, title, filename))
+			return;
+		if (filename == orig_filename)
+			return;
+		new_path = folder + filename + " (1)" + extension;
+	}
+
+	size_t i = 1;
+	for (const std::string &fp : t->second) {
+		new_path = folder + filename + " (" + std::to_string(i) + ")" + extension;
+		os_rename(fp.c_str(), new_path.c_str());
+		i++;
+	}
+	output_files.erase(output);
 }
 
 void ask_rename_file(std::string path)
@@ -107,57 +172,91 @@ void record_stop(void *data, calldata_t *calldata)
 	if (!rename_record_enabled)
 		return;
 	obs_output_t *output = (obs_output_t *)data;
-	obs_data_t *settings = obs_output_get_settings(output);
-	const char *path = obs_data_get_string(settings, "path");
-	if (path && strlen(path) && os_file_exists(path)) {
-		ask_rename_file(path);
-	} else {
-		const char *url = obs_data_get_string(settings, "url");
-		if (url && strlen(url) && os_file_exists(url)) {
-			ask_rename_file(url);
+	auto t = output_files.find(output);
+	if (t == output_files.end()) {
+		obs_data_t *settings = obs_output_get_settings(output);
+		const char *path = obs_data_get_string(settings, "path");
+		if (path && strlen(path) && os_file_exists(path)) {
+			ask_rename_file(path);
+		} else {
+			const char *url = obs_data_get_string(settings, "url");
+			if (url && strlen(url) && os_file_exists(url)) {
+				ask_rename_file(url);
+			}
 		}
+		obs_data_release(settings);
+	} else {
+		obs_queue_task(OBS_TASK_UI, ask_rename_files_UI, (void *)output, false);
 	}
-	obs_data_release(settings);
+}
+
+void file_changed(void *data, calldata_t *calldata)
+{
+	if (!rename_record_enabled)
+		return;
+	obs_output_t *output = (obs_output_t *)data;
+	auto t = output_files.find(output);
+	if (t == output_files.end()) {
+
+		obs_data_t *settings = obs_output_get_settings(output);
+		const char *path = obs_data_get_string(settings, "path");
+		if (path && strlen(path) && os_file_exists(path)) {
+			output_files[output].push_back(path);
+		} else {
+			const char *url = obs_data_get_string(settings, "url");
+			if (url && strlen(url) && os_file_exists(url)) {
+				output_files[output].push_back(url);
+			}
+		}
+		obs_data_release(settings);
+	}
+	const char *next_file = calldata_string(calldata, "next_file");
+	output_files[output].push_back(next_file);
 }
 
 bool loadOutput(void *data, obs_output_t *output)
 {
-	UNUSED_PARAMETER(data);
-	auto r = obs_frontend_get_recording_output();
-	obs_output_release(r);
-	if (r == output)
-		return true;
-	r = obs_frontend_get_replay_buffer_output();
-	obs_output_release(r);
-	if (r == output)
-		return true;
-
+	bool unload = *((bool *)data);
 	if (strcmp("replay_buffer", obs_output_get_id(output)) == 0) {
 		auto sh = obs_output_get_signal_handler(output);
-		signal_handler_connect(sh, "saved", replay_saved, output);
+		if (unload)
+			signal_handler_disconnect(sh, "saved", replay_saved, output);
+		else
+			signal_handler_connect(sh, "saved", replay_saved, output);
 	} else {
 		auto sh = obs_output_get_signal_handler(output);
-		signal_handler_connect(sh, "stop", record_stop, output);
+		if (unload) {
+			signal_handler_disconnect(sh, "stop", record_stop, output);
+			signal_handler_disconnect(sh, "file_changed", file_changed, output);
+		} else {
+			signal_handler_connect(sh, "stop", record_stop, output);
+			signal_handler_connect(sh, "file_changed", file_changed, output);
+		}
 	}
 	return true;
 }
 
 void loadOutputs()
 {
-	obs_enum_outputs(loadOutput, nullptr);
+	bool unload = false;
+	obs_enum_outputs(loadOutput, &unload);
+}
+
+void unloadOutputs()
+{
+	bool unload = true;
+	obs_enum_outputs(loadOutput, &unload);
 }
 
 void frontend_event(obs_frontend_event event, void *param)
 {
 	UNUSED_PARAMETER(param);
 	switch (event) {
-	case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
-		if (rename_record_enabled)
-			ask_rename_file(obs_frontend_get_last_recording());
+	case OBS_FRONTEND_EVENT_RECORDING_STARTED:
+		loadOutputs();
 		break;
-	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVED:
-		if (rename_replay_enabled)
-			ask_rename_file(obs_frontend_get_last_replay());
+	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED:
+		loadOutputs();
 		break;
 	case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING: {
@@ -196,7 +295,7 @@ bool obs_module_load()
 
 	obs_frontend_add_event_callback(frontend_event, nullptr);
 	timer = new QTimer();
-	timer->setInterval(2000);
+	timer->setInterval(10000);
 	QObject::connect(timer, &QTimer::timeout, []() { loadOutputs(); });
 	timer->start();
 
@@ -228,6 +327,7 @@ void obs_module_unload(void)
 		delete timer;
 		timer = nullptr;
 	}
+	unloadOutputs();
 }
 
 RenameFileDialog::RenameFileDialog(QWidget *parent, std::string title) : QDialog(parent)
