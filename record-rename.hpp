@@ -18,3 +18,10 @@ public:
 private:
 	QLineEdit *userText;
 };
+
+class FilenameFormatDialog : public QDialog {
+	Q_OBJECT
+public:
+	FilenameFormatDialog(QWidget *parent);
+	QLineEdit *userText;
+};

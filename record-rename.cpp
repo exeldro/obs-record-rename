@@ -1,12 +1,16 @@
 #include "record-rename.hpp"
 #include "version.h"
+#include "obs-websocket-api.h"
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 #include <QVBoxLayout>
 #include <QDialogButtonBox>
 #include <QMenu>
+#include <QDesktopServices>
+#include <QCompleter>
 #include <QTimer>
 #include <QMainWindow>
+#include <QRegularExpression>
 #include <string>
 #include <util/config-file.h>
 #include <util/dstr.h>
@@ -14,7 +18,18 @@
 
 static bool rename_record_enabled = true;
 static bool rename_replay_enabled = true;
-std::map<obs_output_t *, std::vector<std::string>> output_files;
+static std::map<obs_output_t *, std::vector<std::string>> output_files;
+static std::string filename_format;
+
+static std::string vendor_filename_format;
+static bool vendor_force = false;
+
+static std::string hook_source;
+static std::string hook_title;
+static std::string hook_class;
+static std::string hook_executable;
+
+obs_websocket_vendor vendor = nullptr;
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_AUTHOR("Exeldro");
@@ -28,6 +43,17 @@ MODULE_EXPORT const char *obs_module_description(void)
 MODULE_EXPORT const char *obs_module_name(void)
 {
 	return obs_module_text("RecordRename");
+}
+
+std::string hook_format(std::string format)
+{
+	struct dstr f;
+	dstr_init_copy(&f, format.c_str());
+	dstr_replace(&f, "%TITLE", hook_title.c_str());
+	dstr_replace(&f, "%EXECUTABLE", hook_executable.c_str());
+	std::string hf = f.array;
+	dstr_free(&f);
+	return hf;
 }
 
 void ask_rename_file_UI(void *param)
@@ -60,18 +86,38 @@ void ask_rename_file_UI(void *param)
 		filename = filename.substr(slash_pos);
 	}
 	std::string orig_filename = filename;
-	std::string new_path = folder + filename + extension;
-	while (os_file_exists(new_path.c_str())) {
-		std::string title = obs_module_text("RenameFile");
-		if (orig_filename != filename) {
-			title += ": ";
-			title += obs_module_text("FileExists");
+	bool force = false;
+	if (!vendor_filename_format.empty()) {
+		std::string hf = hook_format(vendor_filename_format);
+		char *formatted = os_generate_formatted_filename(nullptr, true, hf.c_str());
+		if (formatted) {
+			filename = formatted;
+			bfree(formatted);
 		}
-		if (!RenameFileDialog::AskForName(main_window, title, filename))
-			return;
-		if (filename == orig_filename)
-			return;
-		new_path = folder + filename + extension;
+		force = vendor_force;
+		vendor_filename_format.clear();
+	} else if (!filename_format.empty()) {
+		std::string hf = hook_format(filename_format);
+		char *formatted = os_generate_formatted_filename(nullptr, true, hf.c_str());
+		if (formatted) {
+			filename = formatted;
+			bfree(formatted);
+		}
+	}
+	std::string new_path = folder + filename + extension;
+	if (!force || os_file_exists(new_path.c_str())) {
+		do {
+			std::string title = obs_module_text("RenameFile");
+			if (filename != orig_filename && os_file_exists(new_path.c_str())) {
+				title += ": ";
+				title += obs_module_text("FileExists");
+			}
+			if (!RenameFileDialog::AskForName(main_window, title, filename))
+				return;
+			if (filename == orig_filename)
+				return;
+			new_path = folder + filename + extension;
+		} while (os_file_exists(new_path.c_str()));
 	}
 	os_rename(path.c_str(), new_path.c_str());
 }
@@ -109,23 +155,43 @@ void ask_rename_files_UI(void *param)
 		filename = filename.substr(slash_pos);
 	}
 	std::string orig_filename = filename;
-	std::string new_path = folder + filename + extension;
-	while (os_file_exists(new_path.c_str())) {
-		std::string title = obs_module_text("RenameFiles");
-		title += " (";
-		title += std::to_string(t->second.size());
-		title += " ";
-		title += obs_module_text("Files");
-		title += ")";
-		if (orig_filename != filename) {
-			title += ": ";
-			title += obs_module_text("FileExists");
+	bool force = false;
+	if (!vendor_filename_format.empty()) {
+		std::string hf = hook_format(vendor_filename_format);
+		char *formatted = os_generate_formatted_filename(nullptr, true, hf.c_str());
+		if (formatted) {
+			filename = formatted;
+			bfree(formatted);
 		}
-		if (!RenameFileDialog::AskForName(main_window, title, filename))
-			return;
-		if (filename == orig_filename)
-			return;
-		new_path = folder + filename + " (1)" + extension;
+		force = vendor_force;
+		vendor_filename_format.clear();
+	} else if (!filename_format.empty()) {
+		std::string hf = hook_format(filename_format);
+		char *formatted = os_generate_formatted_filename(nullptr, true, hf.c_str());
+		if (formatted) {
+			filename = formatted;
+			bfree(formatted);
+		}
+	}
+	std::string new_path = folder + filename + " (1)" + extension;
+	if (!force || os_file_exists(new_path.c_str())) {
+		do {
+			std::string title = obs_module_text("RenameFiles");
+			title += " (";
+			title += std::to_string(t->second.size());
+			title += " ";
+			title += obs_module_text("Files");
+			title += ")";
+			if (filename != orig_filename && os_file_exists(new_path.c_str())) {
+				title += ": ";
+				title += obs_module_text("FileExists");
+			}
+			if (!RenameFileDialog::AskForName(main_window, title, filename))
+				return;
+			if (filename == orig_filename)
+				return;
+			new_path = folder + filename + " (1)" + extension;
+		} while (os_file_exists(new_path.c_str()));
 	}
 
 	size_t i = 1;
@@ -266,6 +332,9 @@ void frontend_event(obs_frontend_event event, void *param)
 			config_set_default_bool(config, "RecordRename", "RenameReplay", true);
 			rename_record_enabled = config_get_bool(config, "RecordRename", "RenameRecord");
 			rename_replay_enabled = config_get_bool(config, "RecordRename", "RenameReplay");
+			const char *ff = config_get_string(config, "RecordRename", "FilenameFormat");
+			if (ff)
+				filename_format = ff;
 		}
 		loadOutputs();
 		break;
@@ -281,10 +350,32 @@ void save_config()
 	if (config) {
 		config_set_bool(config, "RecordRename", "RenameRecord", rename_record_enabled);
 		config_set_bool(config, "RecordRename", "RenameReplay", rename_replay_enabled);
+		config_set_string(config, "RecordRename", "FilenameFormat", filename_format.c_str());
 	}
 	config_save(config);
 	blog(LOG_INFO, "[Record Rename] Config saved: %s %s", rename_record_enabled ? "true" : "false",
 	     rename_replay_enabled ? "true" : "false");
+}
+
+void hooked(void *data, calldata_t *calldata)
+{
+	UNUSED_PARAMETER(data);
+	obs_source_t *source = (obs_source_t *)calldata_ptr(calldata, "source");
+	hook_source = obs_source_get_name(source);
+	hook_title = calldata_string(calldata, "title");
+	hook_class = calldata_string(calldata, "class");
+	hook_executable = calldata_string(calldata, "executable");
+}
+
+void source_create(void *data, calldata_t *calldata)
+{
+	UNUSED_PARAMETER(data);
+	obs_source_t *source = (obs_source_t *)calldata_ptr(calldata, "source");
+	const char *id = obs_source_get_unversioned_id(source);
+	if (strcmp(id, "game_capture") == 0 || strcmp(id, "window_capture") == 0) {
+		signal_handler_t *sh = obs_source_get_signal_handler(source);
+		signal_handler_connect(sh, "hooked", hooked, nullptr);
+	}
 }
 
 static QTimer *timer;
@@ -294,6 +385,8 @@ bool obs_module_load()
 	blog(LOG_INFO, "[Record Rename] loaded version %s", PROJECT_VERSION);
 
 	obs_frontend_add_event_callback(frontend_event, nullptr);
+	signal_handler_connect(obs_get_signal_handler(), "source_create", source_create, nullptr);
+
 	timer = new QTimer();
 	timer->setInterval(10000);
 	QObject::connect(timer, &QTimer::timeout, []() { loadOutputs(); });
@@ -311,12 +404,50 @@ bool obs_module_load()
 		save_config();
 	});
 	replayAction->setCheckable(true);
+	menu->addAction(QString::fromUtf8(obs_module_text("FileNameFormat")), [] {
+		const auto main_window = static_cast<QWidget *>(obs_frontend_get_main_window());
+		FilenameFormatDialog dialog(main_window);
+		dialog.userText->setMaxLength(170);
+		dialog.userText->setText(QString::fromUtf8(filename_format.c_str()));
+		dialog.userText->selectAll();
+		dialog.userText->setFocus();
+		if (dialog.exec() == QDialog::DialogCode::Accepted) {
+			filename_format = dialog.userText->text().toUtf8().constData();
+			save_config();
+		}
+	});
+	menu->addSeparator();
+	menu->addAction(QString::fromUtf8("Record Rename (" PROJECT_VERSION ")"),
+			[] { QDesktopServices::openUrl(QUrl("https://obsproject.com/forum/resources/record-rename.2134/")); });
+	menu->addAction(QString::fromUtf8("By Exeldro"), [] { QDesktopServices::openUrl(QUrl("https://www.exeldro.com")); });
 	action->setMenu(menu);
 	QObject::connect(menu, &QMenu::aboutToShow, [recordAction, replayAction] {
 		recordAction->setChecked(rename_record_enabled);
 		replayAction->setChecked(rename_replay_enabled);
 	});
 	return true;
+}
+
+void vendor_set_filename(obs_data_t *request_data, obs_data_t *response_data, void *param)
+{
+	UNUSED_PARAMETER(param);
+	const char *filename = obs_data_get_string(request_data, "filename");
+	if (!filename || !strlen(filename)) {
+		obs_data_set_string(response_data, "error", "'filename' not set");
+		obs_data_set_bool(response_data, "success", false);
+		return;
+	}
+	vendor_filename_format = filename;
+	vendor_force = obs_data_get_bool(request_data, "force");
+	obs_data_set_bool(response_data, "success", true);
+}
+
+void obs_module_post_load()
+{
+	vendor = obs_websocket_register_vendor("record-rename");
+	if (!vendor)
+		return;
+	obs_websocket_vendor_register_request(vendor, "set_filename", vendor_set_filename, nullptr);
 }
 
 void obs_module_unload(void)
@@ -363,4 +494,33 @@ bool RenameFileDialog::AskForName(QWidget *parent, std::string title, std::strin
 	}
 	name = dialog.userText->text().toUtf8().constData();
 	return true;
+}
+
+FilenameFormatDialog::FilenameFormatDialog(QWidget *parent) : QDialog(parent)
+{
+	setWindowTitle(QString::fromUtf8(obs_module_text("FilenameFormat")));
+	setModal(true);
+	setWindowModality(Qt::WindowModality::WindowModal);
+	setMinimumWidth(300);
+	setMinimumHeight(100);
+	QVBoxLayout *layout = new QVBoxLayout;
+	setLayout(layout);
+
+	userText = new QLineEdit(this);
+	QStringList specList =
+		QString::fromUtf8(obs_frontend_get_locale_string("FilenameFormatting.completer")).split(QRegularExpression("\n"));
+	specList.append("%TITLE");
+	specList.append("%EXECUTABLE");
+	QCompleter *specCompleter = new QCompleter(specList);
+	specCompleter->setCaseSensitivity(Qt::CaseSensitive);
+	specCompleter->setFilterMode(Qt::MatchContains);
+	userText->setCompleter(specCompleter);
+
+	layout->addWidget(userText);
+
+	QDialogButtonBox *buttonbox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+	layout->addWidget(buttonbox);
+	buttonbox->setCenterButtons(true);
+	connect(buttonbox, &QDialogButtonBox::accepted, this, &QDialog::accept);
+	connect(buttonbox, &QDialogButtonBox::rejected, this, &QDialog::reject);
 }
