@@ -1,23 +1,26 @@
+#include "obs-websocket-api.h"
 #include "record-rename.hpp"
 #include "version.h"
-#include "obs-websocket-api.h"
+#include <media-io/media-remux.h>
 #include <obs-frontend-api.h>
 #include <obs-module.h>
-#include <QVBoxLayout>
-#include <QDialogButtonBox>
-#include <QMenu>
-#include <QDesktopServices>
 #include <QCompleter>
-#include <QTimer>
+#include <QDesktopServices>
+#include <QDialogButtonBox>
 #include <QMainWindow>
+#include <QMenu>
 #include <QRegularExpression>
+#include <QTimer>
+#include <QVBoxLayout>
 #include <string>
 #include <util/config-file.h>
 #include <util/dstr.h>
 #include <util/platform.h>
+#include <util/threading.h>
 
 static bool rename_record_enabled = true;
 static bool rename_replay_enabled = true;
+static bool auto_remux = false;
 static std::map<obs_output_t *, std::vector<std::string>> output_files;
 static std::string filename_format;
 
@@ -54,6 +57,14 @@ std::string hook_format(std::string format)
 	std::string hf = f.array;
 	dstr_free(&f);
 	return hf;
+}
+
+void *remux_thread(void *param)
+{
+	media_remux_job_t mr_job = (media_remux_job_t)param;
+	media_remux_job_process(mr_job, nullptr, nullptr);
+	media_remux_job_destroy(mr_job);
+	return nullptr;
 }
 
 void ask_rename_file_UI(void *param)
@@ -113,13 +124,36 @@ void ask_rename_file_UI(void *param)
 				title += obs_module_text("FileExists");
 			}
 			if (!RenameFileDialog::AskForName(main_window, title, filename))
-				return;
-			if (filename == orig_filename)
-				return;
+				filename = orig_filename;
 			new_path = folder + filename + extension;
-		} while (os_file_exists(new_path.c_str()));
+		} while (filename != orig_filename && os_file_exists(new_path.c_str()));
 	}
-	os_rename(path.c_str(), new_path.c_str());
+	if (filename != orig_filename)
+		os_rename(path.c_str(), new_path.c_str());
+
+	if (auto_remux && extension != ".mp4") {
+		media_remux_job_t mr_job = nullptr;
+		std::string target = folder + filename + ".mp4";
+		if (media_remux_job_create(&mr_job, new_path.c_str(), target.c_str())) {
+			pthread_t thread;
+			pthread_create(&thread, nullptr, remux_thread, mr_job);
+		}
+	}
+}
+
+void *remux_multiple_thread(void *param)
+{
+	std::vector<std::string> *remux = (std::vector<std::string> *)param;
+	for (const std::string &fp : *remux) {
+		media_remux_job_t mr_job = nullptr;
+		std::string target = fp.substr(0, fp.find_last_of('.')) + ".mp4";
+		if (media_remux_job_create(&mr_job, fp.c_str(), target.c_str())) {
+			media_remux_job_process(mr_job, nullptr, nullptr);
+			media_remux_job_destroy(mr_job);
+		}
+	}
+	delete remux;
+	return nullptr;
 }
 
 void ask_rename_files_UI(void *param)
@@ -187,24 +221,37 @@ void ask_rename_files_UI(void *param)
 				title += obs_module_text("FileExists");
 			}
 			if (!RenameFileDialog::AskForName(main_window, title, filename))
-				return;
-			if (filename == orig_filename)
-				return;
+				filename = orig_filename;
+
 			new_path = folder + filename + " (1)" + extension;
-		} while (os_file_exists(new_path.c_str()));
+		} while (filename != orig_filename && os_file_exists(new_path.c_str()));
 	}
 
-	size_t i = 1;
-	for (const std::string &fp : t->second) {
-		new_path = folder + filename + " (" + std::to_string(i) + ")" + extension;
-		os_rename(fp.c_str(), new_path.c_str());
-		i++;
+	std::vector<std::string> *remux = (auto_remux && extension != ".mp4") ? new std::vector<std::string>() : nullptr;
+
+	if (filename != orig_filename) {
+		size_t i = 1;
+		for (const std::string &fp : t->second) {
+			new_path = folder + filename + " (" + std::to_string(i) + ")" + extension;
+			if (remux)
+				remux->emplace_back(new_path);
+			os_rename(fp.c_str(), new_path.c_str());
+			i++;
+		}
+	}
+
+	if (remux) {
+		pthread_t thread;
+		pthread_create(&thread, nullptr, remux_multiple_thread, remux);
 	}
 	output_files.erase(output);
 }
 
 void ask_rename_file(std::string path)
 {
+	if (os_get_path_extension(path.c_str()) == nullptr) {
+		return;
+	}
 	bool autoRemux = config_get_bool(obs_frontend_get_profile_config(), "Video", "AutoRemux");
 	if (autoRemux) {
 		blog(LOG_INFO, "[Record Rename] AutoRemux is enabled, skipping rename.");
@@ -332,6 +379,7 @@ void frontend_event(obs_frontend_event event, void *param)
 			config_set_default_bool(config, "RecordRename", "RenameReplay", true);
 			rename_record_enabled = config_get_bool(config, "RecordRename", "RenameRecord");
 			rename_replay_enabled = config_get_bool(config, "RecordRename", "RenameReplay");
+			auto_remux = config_get_bool(config, "RecordRename", "AutoRemux");
 			const char *ff = config_get_string(config, "RecordRename", "FilenameFormat");
 			if (ff)
 				filename_format = ff;
@@ -351,6 +399,7 @@ void save_config()
 		config_set_bool(config, "RecordRename", "RenameRecord", rename_record_enabled);
 		config_set_bool(config, "RecordRename", "RenameReplay", rename_replay_enabled);
 		config_set_string(config, "RecordRename", "FilenameFormat", filename_format.c_str());
+		config_set_bool(config, "RecordRename", "AutoRemux", auto_remux);
 	}
 	config_save(config);
 	blog(LOG_INFO, "[Record Rename] Config saved: %s %s", rename_record_enabled ? "true" : "false",
@@ -404,7 +453,8 @@ bool obs_module_load()
 		save_config();
 	});
 	replayAction->setCheckable(true);
-	menu->addAction(QString::fromUtf8(obs_module_text("FileNameFormat")), [] {
+	menu->addSeparator();
+	menu->addAction(QString::fromUtf8(obs_module_text("FilenameFormat")), [] {
 		const auto main_window = static_cast<QWidget *>(obs_frontend_get_main_window());
 		FilenameFormatDialog dialog(main_window);
 		dialog.userText->setMaxLength(170);
@@ -416,14 +466,21 @@ bool obs_module_load()
 			save_config();
 		}
 	});
+	auto remuxAction = menu->addAction(QString::fromUtf8(obs_module_text("AutoRemux")), [] {
+		auto_remux = !auto_remux;
+		save_config();
+	});
+	remuxAction->setCheckable(true);
+
 	menu->addSeparator();
 	menu->addAction(QString::fromUtf8("Record Rename (" PROJECT_VERSION ")"),
 			[] { QDesktopServices::openUrl(QUrl("https://obsproject.com/forum/resources/record-rename.2134/")); });
 	menu->addAction(QString::fromUtf8("By Exeldro"), [] { QDesktopServices::openUrl(QUrl("https://www.exeldro.com")); });
 	action->setMenu(menu);
-	QObject::connect(menu, &QMenu::aboutToShow, [recordAction, replayAction] {
+	QObject::connect(menu, &QMenu::aboutToShow, [recordAction, replayAction, remuxAction] {
 		recordAction->setChecked(rename_record_enabled);
 		replayAction->setChecked(rename_replay_enabled);
+		remuxAction->setChecked(auto_remux);
 	});
 	return true;
 }
