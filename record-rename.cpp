@@ -326,24 +326,37 @@ void file_changed(void *data, calldata_t *calldata)
 	const char *next_file = calldata_string(calldata, "next_file");
 	output_files[output].push_back(next_file);
 }
-
+std::vector<obs_output_t *> connected_outputs;
 bool loadOutput(void *data, obs_output_t *output)
 {
 	bool unload = *((bool *)data);
+
+	auto it = std::find(connected_outputs.begin(), connected_outputs.end(), output);
+	if (!unload && it != connected_outputs.end())
+			return true;
+
 	if (strcmp("replay_buffer", obs_output_get_id(output)) == 0) {
 		auto sh = obs_output_get_signal_handler(output);
-		if (unload)
+		if (unload) {
 			signal_handler_disconnect(sh, "saved", replay_saved, output);
-		else
+			if (it != connected_outputs.end())
+				connected_outputs.erase(it);
+		} else {
+
 			signal_handler_connect(sh, "saved", replay_saved, output);
+			connected_outputs.push_back(output);
+		}
 	} else {
 		auto sh = obs_output_get_signal_handler(output);
 		if (unload) {
 			signal_handler_disconnect(sh, "stop", record_stop, output);
 			signal_handler_disconnect(sh, "file_changed", file_changed, output);
+			if (it != connected_outputs.end())
+				connected_outputs.erase(it);
 		} else {
 			signal_handler_connect(sh, "stop", record_stop, output);
 			signal_handler_connect(sh, "file_changed", file_changed, output);
+			connected_outputs.push_back(output);
 		}
 	}
 	return true;
