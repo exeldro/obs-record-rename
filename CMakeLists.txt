@@ -6,7 +6,7 @@ else()
   cmake_minimum_required(VERSION 3.18)
 endif()
 
-project(record-rename VERSION 0.1.1)
+project(record-rename VERSION 0.1.2)
 set(PROJECT_FULL_NAME "Record Rename")
 
 # Set new UUIDs when you start to create a new plugin.
