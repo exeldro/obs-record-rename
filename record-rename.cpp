@@ -525,9 +525,10 @@ bool obs_module_load()
 			[] { QDesktopServices::openUrl(QUrl("https://obsproject.com/forum/resources/record-rename.2134/")); });
 	menu->addAction(QString::fromUtf8("By Exeldro"), [] { QDesktopServices::openUrl(QUrl("https://exeldro.com")); });
 	action->setMenu(menu);
-	QObject::connect(menu, &QMenu::aboutToShow, [recordAction, replayAction, remuxAction] {
+	QObject::connect(menu, &QMenu::aboutToShow, [recordAction, replayAction, remuxAction, confirmAction] {
 		recordAction->setChecked(rename_record_enabled);
 		replayAction->setChecked(rename_replay_enabled);
+		confirmAction->setChecked(user_confirm);
 		remuxAction->setChecked(auto_remux);
 	});
 	return true;
