@@ -20,6 +20,7 @@
 
 static bool rename_record_enabled = true;
 static bool rename_replay_enabled = true;
+static bool user_confirm = true;
 static bool auto_remux = false;
 static std::map<obs_output_t *, std::vector<std::string>> output_files;
 static std::string filename_format;
@@ -65,6 +66,27 @@ void *remux_thread(void *param)
 	media_remux_job_process(mr_job, nullptr, nullptr);
 	media_remux_job_destroy(mr_job);
 	return nullptr;
+}
+
+static void ensure_directory(char *path)
+{
+#ifdef _WIN32
+	char *backslash = strrchr(path, '\\');
+	if (backslash)
+		*backslash = '/';
+#endif
+
+	char *slash = strrchr(path, '/');
+	if (slash) {
+		*slash = 0;
+		os_mkdirs(path);
+		*slash = '/';
+	}
+
+#ifdef _WIN32
+	if (backslash)
+		*backslash = '\\';
+#endif
 }
 
 void ask_rename_file_UI(void *param)
@@ -116,7 +138,7 @@ void ask_rename_file_UI(void *param)
 		}
 	}
 	std::string new_path = folder + filename + extension;
-	if (!force || os_file_exists(new_path.c_str())) {
+	if ((!force || os_file_exists(new_path.c_str())) && user_confirm) {
 		do {
 			std::string title = obs_module_text("RenameFile");
 			if (filename != orig_filename && os_file_exists(new_path.c_str())) {
@@ -128,8 +150,13 @@ void ask_rename_file_UI(void *param)
 			new_path = folder + filename + extension;
 		} while (filename != orig_filename && os_file_exists(new_path.c_str()));
 	}
-	if (filename != orig_filename)
+	if (filename != orig_filename) {
+		struct dstr dir_path;
+		dstr_init_copy(&dir_path, new_path.c_str());
+		ensure_directory(dir_path.array);
+		dstr_free(&dir_path);
 		os_rename(path.c_str(), new_path.c_str());
+	}
 
 	if (auto_remux && extension != ".mp4") {
 		media_remux_job_t mr_job = nullptr;
@@ -390,8 +417,10 @@ void frontend_event(obs_frontend_event event, void *param)
 		if (config) {
 			config_set_default_bool(config, "RecordRename", "RenameRecord", true);
 			config_set_default_bool(config, "RecordRename", "RenameReplay", true);
+			config_set_default_bool(config, "RecordRename", "UserConfirm", true);
 			rename_record_enabled = config_get_bool(config, "RecordRename", "RenameRecord");
 			rename_replay_enabled = config_get_bool(config, "RecordRename", "RenameReplay");
+			user_confirm = config_get_bool(config, "RecordRename", "UserConfirm");
 			auto_remux = config_get_bool(config, "RecordRename", "AutoRemux");
 			const char *ff = config_get_string(config, "RecordRename", "FilenameFormat");
 			if (ff)
@@ -411,12 +440,13 @@ void save_config()
 	if (config) {
 		config_set_bool(config, "RecordRename", "RenameRecord", rename_record_enabled);
 		config_set_bool(config, "RecordRename", "RenameReplay", rename_replay_enabled);
+		config_set_bool(config, "RecordRename", "UserConfirm", user_confirm);
 		config_set_string(config, "RecordRename", "FilenameFormat", filename_format.c_str());
 		config_set_bool(config, "RecordRename", "AutoRemux", auto_remux);
 	}
 	config_save(config);
-	blog(LOG_INFO, "[Record Rename] Config saved: %s %s", rename_record_enabled ? "true" : "false",
-	     rename_replay_enabled ? "true" : "false");
+	blog(LOG_INFO, "[Record Rename] Config saved: %s %s %s %s", rename_record_enabled ? "true" : "false",
+	     rename_replay_enabled ? "true" : "false", user_confirm ? "true" : "false", auto_remux ? "true" : "false");
 }
 
 void hooked(void *data, calldata_t *calldata)
@@ -467,6 +497,11 @@ bool obs_module_load()
 	});
 	replayAction->setCheckable(true);
 	menu->addSeparator();
+	auto confirmAction = menu->addAction(QString::fromUtf8(obs_module_text("UserConfirm")), [] {
+		user_confirm = !user_confirm;
+		save_config();
+	});
+	confirmAction->setCheckable(true);
 	menu->addAction(QString::fromUtf8(obs_module_text("FilenameFormat")), [] {
 		const auto main_window = static_cast<QWidget *>(obs_frontend_get_main_window());
 		FilenameFormatDialog dialog(main_window);
@@ -488,7 +523,7 @@ bool obs_module_load()
 	menu->addSeparator();
 	menu->addAction(QString::fromUtf8("Record Rename (" PROJECT_VERSION ")"),
 			[] { QDesktopServices::openUrl(QUrl("https://obsproject.com/forum/resources/record-rename.2134/")); });
-	menu->addAction(QString::fromUtf8("By Exeldro"), [] { QDesktopServices::openUrl(QUrl("https://www.exeldro.com")); });
+	menu->addAction(QString::fromUtf8("By Exeldro"), [] { QDesktopServices::openUrl(QUrl("https://exeldro.com")); });
 	action->setMenu(menu);
 	QObject::connect(menu, &QMenu::aboutToShow, [recordAction, replayAction, remuxAction] {
 		recordAction->setChecked(rename_record_enabled);
