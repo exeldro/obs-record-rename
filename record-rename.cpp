@@ -137,6 +137,14 @@ void ask_rename_file_UI(void *param)
 			bfree(formatted);
 		}
 	}
+	std::replace(filename.begin(), filename.end(), '<', '_');
+	std::replace(filename.begin(), filename.end(), '>', '_');
+	std::replace(filename.begin(), filename.end(), ':', '_');
+	std::replace(filename.begin(), filename.end(), '"', '_');
+	std::replace(filename.begin(), filename.end(), '|', '_');
+	std::replace(filename.begin(), filename.end(), '?', '_');
+	std::replace(filename.begin(), filename.end(), '*', '_');
+
 	std::string new_path = folder + filename + extension;
 	if ((!force || os_file_exists(new_path.c_str())) && user_confirm) {
 		do {
