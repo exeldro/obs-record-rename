@@ -32,6 +32,8 @@ static std::string hook_source;
 static std::string hook_title;
 static std::string hook_class;
 static std::string hook_executable;
+static std::string scene_name;
+static std::string scene_collection_name;
 
 obs_websocket_vendor vendor = nullptr;
 
@@ -55,6 +57,8 @@ std::string hook_format(std::string format)
 	dstr_init_copy(&f, format.c_str());
 	dstr_replace(&f, "%TITLE", hook_title.c_str());
 	dstr_replace(&f, "%EXECUTABLE", hook_executable.c_str());
+	dstr_replace(&f, "%COLLECTION", scene_collection_name.c_str());
+	dstr_replace(&f, "%SCENE", scene_name.c_str());
 	std::string hf = f.array;
 	dstr_free(&f);
 	return hf;
@@ -368,7 +372,7 @@ bool loadOutput(void *data, obs_output_t *output)
 
 	auto it = std::find(connected_outputs.begin(), connected_outputs.end(), output);
 	if (!unload && it != connected_outputs.end())
-			return true;
+		return true;
 
 	if (strcmp("replay_buffer", obs_output_get_id(output)) == 0) {
 		auto sh = obs_output_get_signal_handler(output);
@@ -435,6 +439,18 @@ void frontend_event(obs_frontend_event event, void *param)
 				filename_format = ff;
 		}
 		loadOutputs();
+		scene_collection_name = obs_frontend_get_current_scene_collection();
+		break;
+	}
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+		scene_collection_name = obs_frontend_get_current_scene_collection();
+		break;
+	case OBS_FRONTEND_EVENT_SCENE_CHANGED: {
+		auto current_scene = obs_frontend_get_current_scene();
+		if (current_scene) {
+			scene_name = obs_source_get_name(current_scene);
+			obs_source_release(current_scene);
+		}
 		break;
 	}
 	default:
