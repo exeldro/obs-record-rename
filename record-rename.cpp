@@ -439,12 +439,21 @@ void frontend_event(obs_frontend_event event, void *param)
 				filename_format = ff;
 		}
 		loadOutputs();
-		scene_collection_name = obs_frontend_get_current_scene_collection();
+		auto scn = obs_frontend_get_current_scene_collection();
+		if (scn) {
+			scene_collection_name = scn;
+			bfree(scn);
+		}
 		break;
 	}
-	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
-		scene_collection_name = obs_frontend_get_current_scene_collection();
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED: {
+		auto scn = obs_frontend_get_current_scene_collection();
+		if (scn) {
+			scene_collection_name = scn;
+			bfree(scn);
+		}
 		break;
+	}
 	case OBS_FRONTEND_EVENT_SCENE_CHANGED: {
 		auto current_scene = obs_frontend_get_current_scene();
 		if (current_scene) {
